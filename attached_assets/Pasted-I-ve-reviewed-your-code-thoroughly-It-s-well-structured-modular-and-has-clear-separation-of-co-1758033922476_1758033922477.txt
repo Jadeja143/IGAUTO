@@ -1,0 +1,176 @@
+I’ve reviewed your code thoroughly. ✅
+It’s well-structured, modular, and has clear separation of concerns (rate limiting, filtering, following/unfollowing, DB ops). Logging and error handling are also thoughtfully implemented. Below are my observations and improvement suggestions:
+
+---
+
+### 👍 Strengths
+
+1. **Clean Architecture**
+
+   * `FollowRateLimiter` encapsulates state and logic nicely.
+   * Separation of filtering (`should_follow_user`), delays (`get_smart_follow_delay`), and error handling (`handle_follow_client_error`) is good.
+
+2. **Error Handling**
+
+   * Uses exponential backoff for rate-limiting errors.
+   * Differentiates between fatal (`403/blocked`) vs. retryable (`429/too many requests`) errors.
+
+3. **Database & Cache Usage**
+
+   * Loads blacklist and followed users into sets for O(1) lookups.
+   * Updates DB after every action — good for resilience if script is interrupted.
+
+4. **Human-Like Behavior**
+
+   * Smart delays, randomness, and extra pauses reduce bot-like patterns.
+   * Skip reasons are tracked and summarized — useful for debugging.
+
+5. **Scalability**
+
+   * Functions like `auto_follow_from_source` and `auto_unfollow_old` are generalized enough to extend later.
+
+---
+
+### ⚠️ Areas for Improvement
+
+#### 1. Rate Limiter Reset Duplication
+
+```python
+if now >= self.hourly_reset_time:
+    self.hourly_follows = 0
+    self.hourly_unfollows = 0
+    self.hourly_reset_time = now + timedelta(hours=1)
+```
+
+This block appears in both `check_hourly_follow_limit` and `check_hourly_unfollow_limit`.
+👉 Suggestion: Extract into a private method (`_reset_hourly_if_needed()`).
+
+---
+
+#### 2. Sleeping Inside Logic
+
+Functions like `auto_follow_from_source` and `handle_follow_client_error` use `time.sleep()`. This blocks the whole process.
+👉 Consider:
+
+* Moving to **asyncio** (`await asyncio.sleep()`) if you want concurrent tasks.
+* Or at least run in a background thread to avoid blocking other bot features.
+
+---
+
+#### 3. Potential Redundant User Processing
+
+You fetch **3x amount** medias:
+
+```python
+medias = safe_hashtag_medias_recent(source_identifier, amount=amount * 3)
+```
+
+But only follow until `count_followed >= amount`.
+👉 Suggestion: Filter early, or explain why 3x oversampling is needed (to counter private/skipped accounts). Otherwise, it’s extra API load.
+
+---
+
+#### 4. Friendships Check Skips Too Aggressively
+
+```python
+except Exception as friendship_error:
+    users_skipped += 1
+    skip_reasons["friendship_check_failed"] = ...
+    continue
+```
+
+If `user_friendship` fails once (e.g., network glitch), the user is skipped permanently.
+👉 Suggestion: Retry once before skipping.
+
+---
+
+#### 5. Hardcoded Limits
+
+Hourly follows/unfollows are hardcoded (15, 20). Same for daily caps.
+👉 Suggestion: Make them **configurable** via DB or `.env`.
+
+---
+
+#### 6. DB Efficiency
+
+Every follow/unfollow runs `INSERT OR REPLACE`. On large scale, this might fragment DB.
+👉 Suggestion: Use `bulk_insert` batching where possible (after every N operations).
+
+---
+
+#### 7. Telegram Notifications
+
+Currently just logs:
+
+```python
+def send_follow_telegram_notification(message: str):
+    log.info(f"📱 Follow notification: {message}")
+```
+
+👉 Suggestion: Wire it into actual Telegram bot handler (`aiogram` / `python-telegram-bot`) — otherwise these updates get lost.
+
+---
+
+#### 8. Type Hints & Return Types
+
+Some functions return mixed types (`str | None`). Example:
+
+```python
+def handle_follow_client_error(...) -> Optional[str]:
+```
+
+But sometimes it sleeps + returns `None` (continue), or returns an error string.
+👉 Suggestion: Use `Literal["stop", None]` or a custom enum to make control flow explicit.
+
+---
+
+#### 9. Log Verbosity
+
+Some loops log every skip. If you’re processing thousands of medias, logs may blow up.
+👉 Suggestion: Log only summary counts of skip reasons, unless `debug` level is enabled.
+
+---
+
+#### 10. Security / Robustness
+
+* Any user input (`source_identifier`, `user_id`) should be sanitized before inserting into DB (to prevent SQL injection if not parameterized).
+* Ensure DB schema has proper indexes (`followed_users.user_id`, `blacklist_users.user_id`) for scalability.
+
+---
+
+### 🚀 Suggested Small Refactor Example
+
+Rate limiter reset refactor:
+
+```python
+class FollowRateLimiter:
+    def __init__(self):
+        self.hourly_follows = 0
+        self.hourly_unfollows = 0
+        self.hourly_reset_time = datetime.now() + timedelta(hours=1)
+        self.error_count = 0
+        self.last_error_time = None
+
+    def _reset_if_needed(self):
+        now = datetime.now()
+        if now >= self.hourly_reset_time:
+            self.hourly_follows = 0
+            self.hourly_unfollows = 0
+            self.hourly_reset_time = now + timedelta(hours=1)
+
+    def check_hourly_follow_limit(self, max_per_hour: int = 15) -> bool:
+        self._reset_if_needed()
+        return self.hourly_follows < max_per_hour
+
+    def check_hourly_unfollow_limit(self, max_per_hour: int = 20) -> bool:
+        self._reset_if_needed()
+        return self.hourly_unfollows < max_per_hour
+```
+
+---
+
+✅ **Verdict:**
+Your code is already **production-quality** for a small-scale bot.
+Main improvements: remove duplication, avoid blocking `sleep()`, make limits configurable, and add actual Telegram integration.
+
+Do you want me to **refactor this into an async version** (so follow/unfollow tasks can run in parallel), or keep it sync but optimize blocking points?

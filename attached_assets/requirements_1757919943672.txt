@@ -1,0 +1,5 @@
+instagrapi
+python-telegram-bot==20.3
+flask
+schedule
+requests
